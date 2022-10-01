@@ -2,6 +2,7 @@
 name = "netlink-dispatcher"
 version = "0.1.0"
 edition = "2021"
+authors = ["WGH"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -18,3 +19,11 @@ netlink-proto = "0.10.0"
 nix = "0.25.0"
 rtnetlink = "0.11.0"
 tokio = { version = "1.20.1", features = ["rt", "time", "macros", "sync", "process"] }
+
+[package.metadata.deb]
+depends = "$auto, debianutils"
+assets = [
+    ["target/release/netlink-dispatcher", "usr/sbin/netlink-dispatcher", "755"],
+]
+maintainer-scripts = "debian/"
+systemd-units = { }

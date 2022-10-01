@@ -1,0 +1,7 @@
+[Socket]
+ReceiveBuffer=128M
+ListenNetlink=route 1360
+PassPacketInfo=yes
+
+[Install]
+WantedBy=sockets.target
