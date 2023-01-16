@@ -11,12 +11,22 @@ env:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v3
     - name: Build
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+
+  deb-package:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: build
+      run: DOCKER_BUILDKIT=1 docker build --output type=local,dest=build .
+    - name: Archive Debian package
+      uses: actions/upload-artifact@v3
+      with:
+        name: .deb package
+        path: build/*.deb
