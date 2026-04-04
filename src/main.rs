@@ -1,7 +1,8 @@
+use std::os::fd::FromRawFd as _;
 use std::os::unix::prelude::*;
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use futures::stream::StreamExt;
 
 use tokio::process::Command;
 use tokio::{
@@ -9,12 +10,12 @@ use tokio::{
     time::{sleep, Duration},
 };
 
-use netlink_packet_route::constants::{
-    RTNLGRP_IPV4_IFADDR, RTNLGRP_IPV4_ROUTE, RTNLGRP_IPV6_IFADDR, RTNLGRP_IPV6_ROUTE,
-};
-use netlink_proto::sys::{AsyncSocket, TokioSocket};
+use netlink_proto::sys::TokioSocket;
+use rtnetlink::sys::protocols::NETLINK_ROUTE;
+use rtnetlink::sys::{Socket, SocketAddr};
+use rtnetlink::MulticastGroup;
 
-use netlink_dispatcher::route_socket::RouteSocket;
+use clap::Parser;
 
 #[derive(Parser, Debug)]
 struct Cli {
@@ -41,19 +42,12 @@ fn set_cloexec(fd: RawFd) {
     .unwrap();
 }
 
-fn get_activated_socket() -> Option<TokioSocket> {
+fn get_activated_socket() -> Option<RawFd> {
     let mut fds = listenfd::ListenFd::from_env();
 
     match fds.take_raw_fd(0) {
         Ok(Some(sock)) => {
-            // TODO verify it's a Netlink socket? (ListenFd::take_custom
-            // doesn't work propertly here as it can be either SOCK_RAW
-            // or SOCK_DGRAM)
-            let mut sock = unsafe { TokioSocket::from_raw_fd(sock) };
-            set_cloexec(sock.socket_mut().as_raw_fd());
-            sock.socket_mut()
-                .set_non_blocking(true)
-                .expect("setting socket to non-blocking should never fail");
+            set_cloexec(sock);
             Some(sock)
         }
         Ok(None) => None,
@@ -99,33 +93,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     env_logger::init();
 
-    let (mut sock, socket_activated) = match get_activated_socket() {
+    let (raw_sock, socket_activated) = match get_activated_socket() {
         Some(sock) => {
             log::info!("Got socket from socket activation");
-            (RouteSocket::new_from_socket(sock), true)
+            (unsafe { Socket::from_raw_fd(sock) }, true)
         }
         None => {
-            let mut sock = RouteSocket::new()?;
-            let mut nl_groups: u32 = 0;
-            for group in [
-                RTNLGRP_IPV4_ROUTE,
-                RTNLGRP_IPV6_ROUTE,
-                RTNLGRP_IPV4_IFADDR,
-                RTNLGRP_IPV6_IFADDR,
+            let mut sock = Socket::new(NETLINK_ROUTE)?;
+            let addr = SocketAddr::new(0, 0);
+            sock.bind(&addr).unwrap();
+
+            for group in &[
+                MulticastGroup::Ipv4Route,
+                MulticastGroup::Ipv6Route,
+                MulticastGroup::Ipv4Ifaddr,
+                MulticastGroup::Ipv6Ifaddr,
             ] {
-                nl_groups |= 1 << (group - 1);
-                sock.add_membership(group)
-                    .expect("add_membership shouldn't fail");
+                sock.add_membership(*group as u32)?;
             }
             log::info!("Socket created and bound");
-            log::debug!(
-                "nl_groups bitmask: {} (0x{:x}) (for socket unit)",
-                nl_groups,
-                nl_groups
-            );
             (sock, false)
         }
     };
+
+    // XXX https://github.com/rust-netlink/netlink-sys/pull/40
+    let sock = unsafe { TokioSocket::from_raw_fd(raw_sock.as_raw_fd()) };
+    std::mem::forget(raw_sock);
 
     let (tx, rx) = watch::channel(());
 
@@ -133,21 +126,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         scripts_runner(rx, *cli.settle_timeout, &cli.scripts_directory).await;
     });
 
+    let (conn, _handle, mut messages) = rtnetlink::from_socket(sock);
+    tokio::spawn(conn);
+
     loop {
         tokio::select! {
-            res = sock.next_message() => {
+            res = messages.next() => {
                 if let Some((message, _)) = res {
                     log::debug!("Received message: {:?}", message);
-                    use netlink_packet_route::NetlinkPayload::*;
+
+                    use rtnetlink::packet_core::NetlinkPayload::*;
                     match message.payload {
-                        Done => {
+                        Done(_) => {
                             log::error!("Unexpected Done netlink packet");
                         },
                         Error(err) => {
                             log::error!("Unexpected Error netlink packet: {:?}", err);
-                        },
-                        Ack(ack) => {
-                            log::warn!("Unexpected Ack netlink packet: {:?}", ack);
                         },
                         Noop => (),
                         Overrun(_) => {
@@ -155,14 +149,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         },
                         InnerMessage(msg) => {
                             log::debug!("Inner message: {:?}", msg);
-                            use netlink_packet_route::RtnlMessage::*;
+
+                            use rtnetlink::packet_route::RouteNetlinkMessage::*;
                             match msg {
                                 NewRoute(route_message) => {
-                                    log::info!("Route added {:?} via {:?}", route_message.destination_prefix(), route_message.gateway());
+                                    log::info!("Route added {:?}", route_message);
                                     tx.send(()).expect("scripts_runner should still be working");
                                 },
                                 DelRoute(route_message) => {
-                                    log::info!("Route removed {:?} via {:?}", route_message.destination_prefix(), route_message.gateway());
+                                    log::info!("Route removed {:?}", route_message);
                                     tx.send(()).expect("scripts_runner should still be working");
                                 },
                                 NewAddress(address_message) => {
@@ -178,6 +173,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         },
+                        other => {
+                            log::warn!("Unexpected netlink packet {:?}", other);
+                        }
                     }
                 } else {
                     log::error!("Stream unexpectedly stopped");
