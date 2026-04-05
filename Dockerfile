@@ -23,7 +23,7 @@ RUN set -eux; \
     source $HOME/.cargo/env; \
     rustc --version; \
     cargo --version; \
-    cargo install --version 1.41.1 cargo-deb;
+    cargo install --locked --version 1.41.1 cargo-deb;
 
 ADD . /usr/src/netlink-dispatcher/
 RUN set -eux; \
