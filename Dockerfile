@@ -20,7 +20,7 @@ RUN set -eux; \
 # install Rust and cargo-deb
 RUN --mount=type=cache,target=/root/.cargo/registry/ \
     set -eux; \
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s - --default-toolchain 1.66 -y; \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s - --default-toolchain 1.94 -y; \
     source $HOME/.cargo/env; \
     rustc --version; \
     cargo --version; \
